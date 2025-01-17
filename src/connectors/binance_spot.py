@@ -8,8 +8,9 @@ import hashlib
 import websocket
 import threading
 
-from ..models import Contract
-
+from src.models import Contract
+from src.models import Candle
+from src.models import Balance
 
 logger = logging.getLogger()
 
@@ -19,8 +20,12 @@ class BinanceSpotClient:
         self._public_key = public_key
         self._secret_key = secret_key
 
-        self._base_url = "https://api.binance.com"
-        self._wss_url = "wss://testnet.binance.vision/ws-api/v3"
+        if testnet:
+            self._base_url = "https://testnet.binance.vision"
+            self._wss_url = "wss://testnet.binance.vision/ws"
+        else:
+            self._base_url = "https://api.binance.com/api"
+            self._wss_url = "wss://stream.binance.com:9443/ws"
 
         self._headers = {'X-MBX-APIKEY': self._public_key}
 
@@ -34,10 +39,10 @@ class BinanceSpotClient:
         self._ws_id = 1
         self._ws = None
 
-        t = threading.Thread(target=self._start_ws)
-        t.start()
+        #t = threading.Thread(target=self._start_ws)
+        #t.start()
 
-        logger.info("Binance Futures Client successfully initialized")
+        logger.info("Binance Spot Client successfully initialized")
 
     def _add_log(self, msg: str):
         logger.info("%s", msg)
@@ -78,12 +83,56 @@ class BinanceSpotClient:
             return None
 
     def get_contracts(self) -> Dict[str, Contract]:
-        exchange_info = self._make_request("GET", "/fapi/v1/exchangeInfo", dict())
+        exchange_info = self._make_request("GET", "/api/v3/exchangeInfo", dict())
 
         contracts = dict()
 
         if exchange_info is not None:
             for contract_data in exchange_info['symbols']:
-                contracts[contract_data['symbol']] = Contract(contract_data, "binance")
+                contracts[contract_data['symbol']] = Contract(contract_data)
 
         return contracts
+
+    def get_historical_candles(self, contract: Contract, interval: str) -> List[Candle]:
+        data = dict()
+        data['symbol'] = contract.symbol
+        data['interval'] = interval
+        data['limit'] = 1000
+
+        raw_candles = self._make_request("GET", "/api/v3/klines", data)
+
+        candles = []
+
+        if raw_candles is not None:
+            for c in raw_candles:
+                candles.append(Candle(c, interval))
+        return candles
+
+    def get_bid_ask(self, contract: Contract) -> Dict[str, float]:
+        data = dict()
+        data['symbol'] = contract.symbol
+        ob_data = self._make_request("GET", "/api/v3/ticker/bookTicker", data)
+
+        if ob_data is not None:
+            if contract.symbol not in self.prices:
+                self.prices[contract.symbol] = {'bid': float(ob_data['bidPrice']), 'ask': float(ob_data['askPrice'])}
+            else:
+                self.prices[contract.symbol]['bid'] = float(ob_data['bidPrice'])
+                self.prices[contract.symbol]['ask'] = float(ob_data['askPrice'])
+
+            return self.prices[contract.symbol]
+
+    def get_balances(self) -> Dict[str, Balance]:
+        data = dict()
+        data['timestamp'] = int(time.time() * 1000)
+        data['signature'] = self._generate_signature(data)
+
+        balances = dict()
+
+        account_data = self._make_request("GET", "/api/v3/account", data)
+
+        if account_data is not None:
+            for a in account_data['balances']:
+                balances[a['asset']] = Balance(a)
+
+        return balances
