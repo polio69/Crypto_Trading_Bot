@@ -1,4 +1,3 @@
-
 class Contract:
     def __init__(self, contract_info: dict):
             self.symbol = contract_info['symbol']
@@ -22,4 +21,10 @@ class Balance:
     def __init__(self, info):
         self.free = float(info['free'])
         self.locked = float(info['locked'])
+
+class OrderStatus:
+    def __init__(self, order_info):
+        self.order_id = order_info['orderId']
+        self.status = order_info['status'].lower()
+        self.avg_price = float(order_info['avgPrice'])
 

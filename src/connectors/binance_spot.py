@@ -7,10 +7,13 @@ import hmac
 import hashlib
 import websocket
 import threading
-
+import ssl
+import certifi
+import json
 from src.models import Contract
 from src.models import Candle
 from src.models import Balance
+from src.models import OrderStatus
 
 logger = logging.getLogger()
 
@@ -39,8 +42,8 @@ class BinanceSpotClient:
         self._ws_id = 1
         self._ws = None
 
-        #t = threading.Thread(target=self._start_ws)
-        #t.start()
+        t = threading.Thread(target=self._start_ws)
+        t.start()
 
         logger.info("Binance Spot Client successfully initialized")
 
@@ -105,7 +108,7 @@ class BinanceSpotClient:
 
         if raw_candles is not None:
             for c in raw_candles:
-                candles.append(Candle(c, interval))
+                candles.append(Candle(c))
         return candles
 
     def get_bid_ask(self, contract: Contract) -> Dict[str, float]:
@@ -136,3 +139,110 @@ class BinanceSpotClient:
                 balances[a['asset']] = Balance(a)
 
         return balances
+
+    def place_order(self, contract: Contract, order_type: str,  quantity: float, side: str, price=None, tif=None) -> OrderStatus:
+        data = dict()
+        data['symbol'] = contract.symbol
+        data['side'] = side.upper()
+        data['quantity'] = round(round(quantity / contract.lot_size) * contract.lot_size, 8)
+        data['type'] = order_type
+
+        if price is not None:
+            data['price'] = round(round(price / contract.tick_size) * contract.tick_size, 8)
+
+        if tif is not None:
+            data['timeInForce'] = tif
+
+        data['timestamp'] = int(time.time() * 1000)
+        data['signature'] = self._generate_signature(data)
+
+        order_status = self._make_request("POST", "/api/v3/order", data)
+
+        if order_status is not None:
+            order_status = OrderStatus(order_status)
+
+        return order_status
+
+    def cancel_order(self, contract: Contract, order_id: int) -> OrderStatus:
+
+        data = dict()
+        data['orderId'] = order_id
+        data['symbol'] = contract.symbol
+
+        data['timestamp'] = int(time.time() * 1000)
+        data['signature'] = self._generate_signature(data)
+
+        order_status = self._make_request("DELETE", "/api/v3/order", data)
+
+        if order_status is not None:
+            order_status = OrderStatus(order_status)
+
+        return order_status
+
+    def get_order_status(self, contract: Contract, order_id: int) -> OrderStatus:
+
+        data = dict()
+        data['timestamp'] = int(time.time() * 1000)
+        data['symbol'] = contract.symbol
+        data['orderId'] = order_id
+        data['signature'] = self._generate_signature(data)
+
+        order_status = self._make_request("GET", "/api/v3/order", data)
+
+        if order_status is not None:
+            order_status = OrderStatus(order_status)
+
+        return order_status
+
+    def _start_ws(self):
+        self._ws = websocket.WebSocketApp(self._wss_url, on_open=self._on_open, on_close=self._on_close,
+                                         on_error=self._on_error, on_message=self._on_message)
+
+        while True:
+            try:
+                self._ws.run_forever(sslopt={"cert_reqs": ssl.CERT_REQUIRED, "ca_certs": certifi.where()})
+            except Exception as e:
+                logger.error("Binance error in run_forever() method: %s", e)
+            time.sleep(2)
+
+    def _on_open(self, ws):
+        logger.info("Binance connection opened")
+
+        self.subscribe_channel(list(self.contracts.values()), "bookTicker")
+        self.subscribe_channel(list(self.contracts.values()), "aggTrader")
+
+    def _on_close(self, ws, *args):
+        logger.warning("Binance Websocket connection closed")
+
+    def _on_error(self, ws, msg: str):
+        logger.error("Binance connection error: %s", msg)
+
+    def _on_message(self, ws, msg: str):
+
+        data = json.loads(msg)
+
+        if "e" in data:
+            if data['e'] == "bookTicker":
+
+                symbol = data['s']
+
+                if symbol not in self.prices:
+                    self.prices[symbol] = {'bid': float(data['b']), 'ask': float(data['a'])}
+                else:
+                    self.prices[symbol]['bid'] = float(data['b'])
+                    self.prices[symbol]['ask'] = float(data['a'])
+
+    def subscribe_channel(self, contracts: List[Contract], channel: str):
+        data = dict()
+        data['method'] = "SUBSCRIBE"
+        data['params'] = []
+        for contract in contracts:
+            data['params'].append(contract.symbol.lower() + "@" + channel)
+        data['id'] = self._ws_id
+
+        try:
+            self._ws.send(json.dumps(data))
+        except Exception as e:
+            logger.error("Websocket error while subscribing to %s %s updates: %s", len(contracts), channel, e)
+
+        self._ws_id += 1

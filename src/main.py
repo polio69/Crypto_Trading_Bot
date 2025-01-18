@@ -26,4 +26,3 @@ if __name__ == '__main__':
     logger.info(f"API Key loaded: {'*' * len(api_key)}")
 
     client = BinanceSpotClient(api_key, secret_key, testnet=True)
-
